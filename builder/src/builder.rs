@@ -1,14 +1,26 @@
+use darling::FromField;
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
-use syn::{AngleBracketedGenericArguments, Data, DataStruct, DeriveInput, Field, Fields, FieldsNamed, GenericArgument, PathArguments, Type, TypePath};
-use syn::punctuated::Punctuated;
-use syn::token::Comma;
+use syn::{AngleBracketedGenericArguments, Data, DataStruct, DeriveInput, Fields, FieldsNamed, GenericArgument, PathArguments, Type, TypePath};
+
+#[derive(Debug, Default, FromField)]
+#[darling(default, attributes(builder))]
+struct Opts {
+    each: Option<String>,
+}
+
+struct Fd {
+    name: Ident,
+    ty: Type,
+    opts: Opts,
+}
+
 
 pub struct BuilderContext {
     /// the struct name
     name: Ident,
     /// the fields named and type
-    fields: Punctuated<Field, Comma>,
+    fields: Vec<Fd>,
 }
 
 impl BuilderContext {
@@ -20,6 +32,14 @@ impl BuilderContext {
         } else {
             unreachable!("Unsupported struct")
         };
+
+        let fields = fields.into_iter().map(|f| {
+            Fd {
+                opts: Opts::from_field(&f).unwrap_or_default(),
+                name: f.ident.unwrap(),
+                ty: f.ty,
+            }
+        }).collect();
 
         Self {
             name,
@@ -54,7 +74,7 @@ impl BuilderContext {
                 #(#methods)*
 
                 pub fn build(&mut self) -> Result<#name, &'static str> {
-                    Ok(#name{
+                    Ok(#name {
                         #(#assigns,)*
                     })
                 }
@@ -73,9 +93,9 @@ impl BuilderContext {
     fn gen_optional_fields<'a>(&'a self) -> impl Iterator<Item=TokenStream> + 'a {
         self.fields.iter().map(|f| {
             let ty = &f.ty;
-            let name = &f.ident;
+            let name = &f.name;
 
-            if get_option_arg(ty).is_some() {
+            if get_inner_type(ty, "Option").is_some() {
                 quote! { #name : #ty }
             } else {
                 quote! { #name : std::option::Option<#ty> }
@@ -86,25 +106,39 @@ impl BuilderContext {
     fn gen_methods<'a>(&'a self) -> impl Iterator<Item=TokenStream> + 'a {
         self.fields.iter().map(|f| {
             let ty = &f.ty;
-            let name = &f.ident;
+            let name = &f.name;
 
-            let option = get_option_arg(ty);
-
+            let option = get_inner_type(ty, "Option");
             if option.is_some() {
                 let inner_ty = option.unwrap();
-                quote! {
+                return quote! {
                     pub fn #name(&mut self, v: impl Into<#inner_ty>) -> &mut Self {
                         self.#name = Some(v.into());
                         self
                     }
-                }
-            } else {
-                // fn executable(mut self, v: String) -> Self { self.executable = Some(v); self }
-                quote! {
-                    pub fn #name(&mut self, v: impl Into<#ty>) -> &mut Self {
-                        self.#name = Some(v.into());
+                };
+            }
+
+            let vec = get_inner_type(ty, "Vec");
+            if vec.is_some() && f.opts.each.is_some() {
+                let inner_ty = vec.unwrap();
+                let each = Ident::new(f.opts.each.as_ref().unwrap(), f.name.span());
+                return quote! {
+                    pub fn #each(&mut self, v: impl Into<#inner_ty>) -> &mut Self {
+                        let item = v.into();
+                        let mut vec = self.#name.take().unwrap_or(vec![]);
+                        vec.push(item);
+                        self.#name = Some(vec);
                         self
                     }
+                };
+            }
+
+            // fn executable(mut self, v: String) -> Self { self.executable = Some(v); self }
+            quote! {
+                pub fn #name(&mut self, v: impl Into<#ty>) -> &mut Self {
+                    self.#name = Some(v.into());
+                    self
                 }
             }
         })
@@ -112,12 +146,16 @@ impl BuilderContext {
 
     fn gen_assigns<'a>(&'a self) -> impl Iterator<Item=TokenStream> + 'a {
         self.fields.iter().map(|f| {
-            let name = &f.ident;
+            let name = &f.name;
 
             let ty = &f.ty;
-            if get_option_arg(ty).is_some() {
+            if get_inner_type(ty, "Option").is_some() {
                 quote! {
                     #name : self.#name.take()
+                }
+            } else if get_inner_type(ty, "Vec").is_some() {
+                quote! {
+                    #name : self.#name.take().unwrap_or(vec![])
                 }
             } else {
                 quote! {
@@ -128,7 +166,8 @@ impl BuilderContext {
     }
 }
 
-fn get_option_arg(ty: &Type) -> Option<&Type> {
+/// return a inner type if the input ty is equal the name
+fn get_inner_type<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
     match ty {
         Type::Path(TypePath { path, .. }) => {
             if path.segments.len() != 1 {
@@ -136,7 +175,7 @@ fn get_option_arg(ty: &Type) -> Option<&Type> {
             }
 
             let seg = path.segments.last().unwrap();
-            if seg.ident != "Option" {
+            if seg.ident != name {
                 return None;
             }
 
