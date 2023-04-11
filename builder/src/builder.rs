@@ -1,4 +1,5 @@
 use darling::FromField;
+use darling::util::parse_attribute_to_meta_list;
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{AngleBracketedGenericArguments, Data, DataStruct, DeriveInput, Fields, FieldsNamed, GenericArgument, PathArguments, Type, TypePath};
@@ -24,7 +25,7 @@ pub struct BuilderContext {
 }
 
 impl BuilderContext {
-    pub(crate) fn new(input: DeriveInput) -> Self {
+    pub(crate) fn new(input: DeriveInput) -> Result<Self, syn::Error> {
         let name = input.ident;
 
         let fields = if let Data::Struct(DataStruct { fields: Fields::Named(FieldsNamed { named, .. }), .. }) = input.data {
@@ -33,18 +34,44 @@ impl BuilderContext {
             unreachable!("Unsupported struct")
         };
 
+        let result = fields.iter().try_for_each(|f| {
+            match Opts::from_field(&f) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    let optional_attr = builder_of(f);
+                    let err_str = e.to_string();
+                    if err_str.contains("Unknown field:") && optional_attr.is_some(){
+                        let attr = optional_attr.unwrap();
+                        return match parse_attribute_to_meta_list(attr) {
+                            Ok(meta_list) => {
+                                Err(syn::Error::new_spanned(meta_list, "expected `builder(each = \"...\")`"))
+                            }
+                            Err(_) => Ok(())
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        });
+
+        if let Err(e) = result {
+            return Err(e);
+        }
+
         let fields = fields.into_iter().map(|f| {
+            let opts = Opts::from_field(&f).unwrap_or_default();
+
             Fd {
-                opts: Opts::from_field(&f).unwrap_or_default(),
+                opts,
                 name: f.ident.unwrap(),
                 ty: f.ty,
             }
         }).collect();
 
-        Self {
+        Ok(Self {
             name,
             fields,
-        }
+        })
     }
 
     pub(crate) fn generate(&self) -> TokenStream {
@@ -73,8 +100,8 @@ impl BuilderContext {
             impl #builder_name {
                 #(#methods)*
 
-                pub fn build(&mut self) -> Result<#name, &'static str> {
-                    Ok(#name {
+                pub fn build(&mut self) -> std::result::Result<#name, &'static str> {
+                    std::result::Result::Ok(#name {
                         #(#assigns,)*
                     })
                 }
@@ -113,7 +140,7 @@ impl BuilderContext {
                 let inner_ty = option.unwrap();
                 return quote! {
                     pub fn #name(&mut self, v: impl Into<#inner_ty>) -> &mut Self {
-                        self.#name = Some(v.into());
+                        self.#name = std::option::Option::Some(v.into());
                         self
                     }
                 };
@@ -194,4 +221,13 @@ fn get_inner_type<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
         }
         _ => None,
     }
+}
+
+fn builder_of(f: &syn::Field) -> Option<&syn::Attribute> {
+    for attr in &f.attrs {
+        if attr.path.segments.len() == 1 && attr.path.segments[0].ident == "builder" {
+            return Some(attr);
+        }
+    }
+    None
 }

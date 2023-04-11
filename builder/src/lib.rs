@@ -10,7 +10,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     //println!("{:#?}", input);
 
-    let builder_context = BuilderContext::new(input);
+    let builder_context = match BuilderContext::new(input) {
+        Ok(bc) => bc,
+        Err(e) => return e.to_compile_error().into(),
+    };
     builder_context.generate().into()
 
     //TokenStream::default()
