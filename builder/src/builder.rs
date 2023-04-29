@@ -35,7 +35,7 @@ impl BuilderContext {
         };
 
         let result = fields.iter().try_for_each(|f| {
-            match Opts::from_field(&f) {
+            match Opts::from_field(f) {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     let optional_attr = builder_of(f);
@@ -225,7 +225,7 @@ fn get_inner_type<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
 
 fn builder_of(f: &syn::Field) -> Option<&syn::Attribute> {
     for attr in &f.attrs {
-        if attr.path.segments.len() == 1 && attr.path.segments[0].ident == "builder" {
+        if attr.path().segments.len() == 1 && attr.path().segments[0].ident == "builder" {
             return Some(attr);
         }
     }
